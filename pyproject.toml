@@ -1,0 +1,11 @@
+[project]
+name = "query-sense"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "langchain>=0.3.27",
+    "langgraph>=0.6.6",
+    "litellm>=1.75.9",
+]
