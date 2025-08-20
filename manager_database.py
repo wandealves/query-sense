@@ -1,5 +1,6 @@
 from typing import Any, Dict, List, Optional
 import logging
+import json
 from contextlib import contextmanager
 from sqlalchemy import create_engine, text, Engine
 from sqlalchemy.exc import SQLAlchemyError
@@ -382,6 +383,357 @@ class ManagerDatabase:
         except SQLAlchemyError as e:
             logger.error(f"Erro ao obter tabelas: {e}")
             raise
+            
+    def get_table_columns_detailed(self, table_name: str, schema_name: Optional[str] = None) -> List[Dict[str, Any]]:
+        """
+        Obtém informações detalhadas sobre as colunas de uma tabela específica.
+        
+        Args:
+            table_name: Nome da tabela
+            schema_name: Nome do schema (opcional)
+            
+        Returns:
+            Lista com informações detalhadas das colunas
+        """
+        db_type = self._get_database_type()
+        
+        try:
+            if db_type == 'postgresql':
+                query = """
+                SELECT 
+                    c.column_name,
+                    c.data_type,
+                    c.is_nullable,
+                    c.column_default,
+                    c.character_maximum_length,
+                    c.numeric_precision,
+                    c.numeric_scale,
+                    c.ordinal_position,
+                    CASE WHEN pk.column_name IS NOT NULL THEN true ELSE false END as is_primary_key,
+                    CASE WHEN fk.column_name IS NOT NULL THEN true ELSE false END as is_foreign_key,
+                    fk.referenced_table_name,
+                    fk.referenced_column_name
+                FROM information_schema.columns c
+                LEFT JOIN (
+                    SELECT ku.column_name, ku.table_name, ku.table_schema
+                    FROM information_schema.table_constraints tc
+                    JOIN information_schema.key_column_usage ku 
+                        ON tc.constraint_name = ku.constraint_name 
+                        AND tc.table_schema = ku.table_schema
+                    WHERE tc.constraint_type = 'PRIMARY KEY'
+                ) pk ON c.column_name = pk.column_name 
+                    AND c.table_name = pk.table_name 
+                    AND c.table_schema = pk.table_schema
+                LEFT JOIN (
+                    SELECT 
+                        ku.column_name, 
+                        ku.table_name, 
+                        ku.table_schema,
+                        ccu.table_name as referenced_table_name,
+                        ccu.column_name as referenced_column_name
+                    FROM information_schema.table_constraints tc
+                    JOIN information_schema.key_column_usage ku 
+                        ON tc.constraint_name = ku.constraint_name 
+                        AND tc.table_schema = ku.table_schema
+                    JOIN information_schema.constraint_column_usage ccu 
+                        ON tc.constraint_name = ccu.constraint_name 
+                        AND tc.table_schema = ccu.table_schema
+                    WHERE tc.constraint_type = 'FOREIGN KEY'
+                ) fk ON c.column_name = fk.column_name 
+                    AND c.table_name = fk.table_name 
+                    AND c.table_schema = fk.table_schema
+                WHERE c.table_name = :table_name
+                """
+                parameters = {"table_name": table_name}
+                if schema_name:
+                    query += " AND c.table_schema = :schema_name"
+                    parameters["schema_name"] = schema_name
+                query += " ORDER BY c.ordinal_position"
+                
+            elif db_type == 'mysql':
+                query = """
+                SELECT 
+                    c.column_name,
+                    c.data_type,
+                    c.is_nullable,
+                    c.column_default,
+                    c.character_maximum_length,
+                    c.numeric_precision,
+                    c.numeric_scale,
+                    c.ordinal_position,
+                    CASE WHEN c.column_key = 'PRI' THEN true ELSE false END as is_primary_key,
+                    CASE WHEN c.column_key = 'MUL' THEN true ELSE false END as is_foreign_key,
+                    kcu.referenced_table_name,
+                    kcu.referenced_column_name
+                FROM information_schema.columns c
+                LEFT JOIN information_schema.key_column_usage kcu 
+                    ON c.table_name = kcu.table_name 
+                    AND c.column_name = kcu.column_name 
+                    AND c.table_schema = kcu.table_schema
+                    AND kcu.referenced_table_name IS NOT NULL
+                WHERE c.table_name = :table_name
+                """
+                parameters = {"table_name": table_name}
+                if schema_name:
+                    query += " AND c.table_schema = :schema_name"
+                    parameters["schema_name"] = schema_name
+                query += " ORDER BY c.ordinal_position"
+                
+            elif db_type == 'sqlite':
+                # SQLite usa PRAGMA table_info()
+                query = f"PRAGMA table_info({table_name})"
+                results = self.execute_query(query)
+                
+                # Converter formato do SQLite para formato padrão
+                formatted_results = []
+                for row in results:
+                    formatted_results.append({
+                        'column_name': row['name'],
+                        'data_type': row['type'],
+                        'is_nullable': 'YES' if row['notnull'] == 0 else 'NO',
+                        'column_default': row['dflt_value'],
+                        'character_maximum_length': None,
+                        'numeric_precision': None,
+                        'numeric_scale': None,
+                        'ordinal_position': row['cid'] + 1,
+                        'is_primary_key': bool(row['pk']),
+                        'is_foreign_key': False,
+                        'referenced_table_name': None,
+                        'referenced_column_name': None
+                    })
+                return formatted_results
+                
+            elif db_type == 'sqlserver':
+                query = """
+                SELECT 
+                    c.column_name,
+                    c.data_type,
+                    c.is_nullable,
+                    c.column_default,
+                    c.character_maximum_length,
+                    c.numeric_precision,
+                    c.numeric_scale,
+                    c.ordinal_position,
+                    CASE WHEN pk.column_name IS NOT NULL THEN CAST(1 as bit) ELSE CAST(0 as bit) END as is_primary_key,
+                    CASE WHEN fk.column_name IS NOT NULL THEN CAST(1 as bit) ELSE CAST(0 as bit) END as is_foreign_key,
+                    fk.referenced_table_name,
+                    fk.referenced_column_name
+                FROM information_schema.columns c
+                LEFT JOIN (
+                    SELECT ku.column_name, ku.table_name, ku.table_schema
+                    FROM information_schema.table_constraints tc
+                    JOIN information_schema.key_column_usage ku 
+                        ON tc.constraint_name = ku.constraint_name 
+                        AND tc.table_schema = ku.table_schema
+                    WHERE tc.constraint_type = 'PRIMARY KEY'
+                ) pk ON c.column_name = pk.column_name 
+                    AND c.table_name = pk.table_name 
+                    AND c.table_schema = pk.table_schema
+                LEFT JOIN (
+                    SELECT 
+                        ku.column_name, 
+                        ku.table_name, 
+                        ku.table_schema,
+                        ccu.table_name as referenced_table_name,
+                        ccu.column_name as referenced_column_name
+                    FROM information_schema.table_constraints tc
+                    JOIN information_schema.key_column_usage ku 
+                        ON tc.constraint_name = ku.constraint_name 
+                        AND tc.table_schema = ku.table_schema
+                    JOIN information_schema.constraint_column_usage ccu 
+                        ON tc.constraint_name = ccu.constraint_name 
+                        AND tc.table_schema = ccu.table_schema
+                    WHERE tc.constraint_type = 'FOREIGN KEY'
+                ) fk ON c.column_name = fk.column_name 
+                    AND c.table_name = fk.table_name 
+                    AND c.table_schema = fk.table_schema
+                WHERE c.table_name = :table_name
+                """
+                parameters = {"table_name": table_name}
+                if schema_name:
+                    query += " AND c.table_schema = :schema_name"
+                    parameters["schema_name"] = schema_name
+                query += " ORDER BY c.ordinal_position"
+                
+            elif db_type == 'oracle':
+                query = """
+                SELECT 
+                    atc.column_name,
+                    atc.data_type,
+                    CASE WHEN atc.nullable = 'Y' THEN 'YES' ELSE 'NO' END as is_nullable,
+                    atc.data_default as column_default,
+                    atc.char_length as character_maximum_length,
+                    atc.data_precision as numeric_precision,
+                    atc.data_scale as numeric_scale,
+                    atc.column_id as ordinal_position,
+                    CASE WHEN acc.column_name IS NOT NULL THEN 1 ELSE 0 END as is_primary_key,
+                    CASE WHEN fk.column_name IS NOT NULL THEN 1 ELSE 0 END as is_foreign_key,
+                    fk.referenced_table_name,
+                    fk.referenced_column_name
+                FROM all_tab_columns atc
+                LEFT JOIN (
+                    SELECT acc.column_name, acc.table_name, acc.owner
+                    FROM all_cons_columns acc
+                    JOIN all_constraints ac ON acc.constraint_name = ac.constraint_name
+                    WHERE ac.constraint_type = 'P'
+                ) acc ON atc.column_name = acc.column_name 
+                    AND atc.table_name = acc.table_name 
+                    AND atc.owner = acc.owner
+                LEFT JOIN (
+                    SELECT 
+                        acc.column_name, 
+                        acc.table_name, 
+                        acc.owner,
+                        r_acc.table_name as referenced_table_name,
+                        r_acc.column_name as referenced_column_name
+                    FROM all_cons_columns acc
+                    JOIN all_constraints ac ON acc.constraint_name = ac.constraint_name
+                    JOIN all_cons_columns r_acc ON ac.r_constraint_name = r_acc.constraint_name
+                    WHERE ac.constraint_type = 'R'
+                ) fk ON atc.column_name = fk.column_name 
+                    AND atc.table_name = fk.table_name 
+                    AND atc.owner = fk.owner
+                WHERE atc.table_name = :table_name
+                """
+                parameters = {"table_name": table_name.upper()}
+                if schema_name:
+                    query += " AND atc.owner = :schema_name"
+                    parameters["schema_name"] = schema_name.upper()
+                query += " ORDER BY atc.column_id"
+                
+            else:
+                # Fallback genérico usando information_schema
+                query = """
+                SELECT 
+                    column_name,
+                    data_type,
+                    is_nullable,
+                    column_default,
+                    character_maximum_length,
+                    numeric_precision,
+                    numeric_scale,
+                    ordinal_position,
+                    false as is_primary_key,
+                    false as is_foreign_key,
+                    null as referenced_table_name,
+                    null as referenced_column_name
+                FROM information_schema.columns 
+                WHERE table_name = :table_name
+                """
+                parameters = {"table_name": table_name}
+                if schema_name:
+                    query += " AND table_schema = :schema_name"
+                    parameters["schema_name"] = schema_name
+                query += " ORDER BY ordinal_position"
+                
+            return self.execute_query(query, parameters)
+            
+        except SQLAlchemyError as e:
+            logger.error(f"Erro ao obter colunas detalhadas da tabela {table_name}: {e}")
+            raise
+            
+    def get_database_structure_json(self, schema_filter: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Obtém a estrutura completa do banco de dados em formato JSON.
+        
+        Args:
+            schema_filter: Nome do schema específico para filtrar (opcional)
+            
+        Returns:
+            Dicionário com a estrutura completa do banco
+        """
+        db_type = self._get_database_type()
+        
+        try:
+            # Estrutura base do JSON
+            structure = {
+                "database_type": db_type,
+                "connection_string": self.connection_string.split('@')[0] + '@***',  # Ocultar credenciais
+                "schemas": []
+            }
+            
+            # Obter schemas
+            if schema_filter:
+                schemas = [schema_filter] if schema_filter in self.get_schemas() else []
+            else:
+                schemas = self.get_schemas()
+                
+            for schema_name in schemas:
+                schema_info = {
+                    "schema_name": schema_name,
+                    "tables": []
+                }
+                
+                # Obter tabelas do schema
+                if db_type == 'sqlite':
+                    tables = self.get_tables()
+                else:
+                    tables = self.get_tables(schema_name)
+                    
+                for table in tables:
+                    table_info = {
+                        "table_name": table['table_name'],
+                        "table_type": table['table_type'],
+                        "columns": []
+                    }
+                    
+                    # Obter colunas detalhadas da tabela
+                    columns = self.get_table_columns_detailed(
+                        table['table_name'], 
+                        schema_name if db_type != 'sqlite' else None
+                    )
+                    
+                    for column in columns:
+                        column_info = {
+                            "column_name": column['column_name'],
+                            "data_type": column['data_type'],
+                            "is_nullable": column['is_nullable'],
+                            "column_default": column['column_default'],
+                            "character_maximum_length": column.get('character_maximum_length'),
+                            "numeric_precision": column.get('numeric_precision'),
+                            "numeric_scale": column.get('numeric_scale'),
+                            "ordinal_position": column.get('ordinal_position'),
+                            "is_primary_key": column.get('is_primary_key', False),
+                            "is_foreign_key": column.get('is_foreign_key', False),
+                            "referenced_table_name": column.get('referenced_table_name'),
+                            "referenced_column_name": column.get('referenced_column_name')
+                        }
+                        table_info["columns"].append(column_info)
+                        
+                    schema_info["tables"].append(table_info)
+                    
+                structure["schemas"].append(schema_info)
+                
+            return structure
+            
+        except SQLAlchemyError as e:
+            logger.error(f"Erro ao obter estrutura do banco: {e}")
+            raise
+            
+    def export_structure_to_file(self, file_path: str, schema_filter: Optional[str] = None, indent: int = 2) -> bool:
+        """
+        Exporta a estrutura do banco de dados para um arquivo JSON.
+        
+        Args:
+            file_path: Caminho do arquivo para salvar
+            schema_filter: Nome do schema específico para filtrar (opcional)
+            indent: Indentação do JSON (padrão: 2)
+            
+        Returns:
+            True se exportado com sucesso
+        """
+        try:
+            structure = self.get_database_structure_json(schema_filter)
+            
+            with open(file_path, 'w', encoding='utf-8') as f:
+                json.dump(structure, f, indent=indent, ensure_ascii=False, default=str)
+                
+            logger.info(f"Estrutura exportada para: {file_path}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Erro ao exportar estrutura: {e}")
+            return False
         
     def __enter__(self):
         """Suporte para context manager."""
