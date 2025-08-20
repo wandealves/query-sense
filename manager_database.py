@@ -6,7 +6,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 logger = logging.getLogger(__name__)
 
-class DatabaseConnector:
+class ManagerDatabase:
     """
     Suporta múltiplos SGBDs através do SQLAlchemy:
     - PostgreSQL
