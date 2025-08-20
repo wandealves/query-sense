@@ -187,6 +187,202 @@ class DatabaseConnector:
         """
         return self.execute_query(query, {"table_name": table_name})
         
+    def _get_database_type(self) -> str:
+        """
+        Detecta o tipo de banco de dados baseado na connection string.
+        
+        Returns:
+            String identificando o tipo do banco
+        """
+        connection_lower = self.connection_string.lower()
+        
+        if connection_lower.startswith('postgresql://') or connection_lower.startswith('postgres://'):
+            return 'postgresql'
+        elif connection_lower.startswith('mysql+') or connection_lower.startswith('mysql://'):
+            return 'mysql'
+        elif connection_lower.startswith('sqlite'):
+            return 'sqlite'
+        elif connection_lower.startswith('mssql+') or connection_lower.startswith('sqlserver'):
+            return 'sqlserver'
+        elif connection_lower.startswith('oracle+'):
+            return 'oracle'
+        else:
+            return 'unknown'
+            
+    def get_schemas(self) -> List[str]:
+        """
+        Obtém a lista de schemas disponíveis no banco de dados.
+        
+        Returns:
+            Lista com nomes dos schemas
+        """
+        db_type = self._get_database_type()
+        
+        try:
+            if db_type == 'postgresql':
+                # PostgreSQL - usar information_schema ou pg_namespace
+                query = """
+                SELECT schema_name 
+                FROM information_schema.schemata 
+                WHERE schema_name NOT IN ('information_schema', 'pg_catalog', 'pg_toast')
+                ORDER BY schema_name
+                """
+                results = self.execute_query(query)
+                return [row['schema_name'] for row in results]
+                
+            elif db_type == 'mysql':
+                # MySQL - usar information_schema
+                query = """
+                SELECT schema_name 
+                FROM information_schema.schemata 
+                WHERE schema_name NOT IN ('information_schema', 'performance_schema', 'mysql', 'sys')
+                ORDER BY schema_name
+                """
+                results = self.execute_query(query)
+                return [row['schema_name'] for row in results]
+                
+            elif db_type == 'sqlite':
+                # SQLite não tem schemas reais, retorna schema padrão
+                return ['main']
+                
+            elif db_type == 'sqlserver':
+                # SQL Server - usar sys.schemas
+                query = """
+                SELECT name as schema_name
+                FROM sys.schemas 
+                WHERE name NOT IN ('sys', 'information_schema', 'guest', 'INFORMATION_SCHEMA')
+                ORDER BY name
+                """
+                results = self.execute_query(query)
+                return [row['schema_name'] for row in results]
+                
+            elif db_type == 'oracle':
+                # Oracle - usar all_users (equivalente a schemas)
+                query = """
+                SELECT username as schema_name
+                FROM all_users 
+                WHERE username NOT IN ('SYS', 'SYSTEM', 'DBSNMP', 'SYSMAN', 'OUTLN')
+                ORDER BY username
+                """
+                results = self.execute_query(query)
+                return [row['schema_name'] for row in results]
+                
+            else:
+                # Fallback genérico usando information_schema
+                query = """
+                SELECT schema_name 
+                FROM information_schema.schemata 
+                ORDER BY schema_name
+                """
+                results = self.execute_query(query)
+                return [row['schema_name'] for row in results]
+                
+        except SQLAlchemyError as e:
+            logger.warning(f"Erro ao obter schemas: {e}")
+            # Retorna lista vazia se não conseguir obter schemas
+            return []
+            
+    def get_tables(self, schema_name: Optional[str] = None) -> List[Dict[str, Any]]:
+        """
+        Obtém a lista de tabelas de um schema específico ou do schema padrão.
+        
+        Args:
+            schema_name: Nome do schema (opcional)
+            
+        Returns:
+            Lista com informações das tabelas
+        """
+        db_type = self._get_database_type()
+        
+        try:
+            if db_type == 'postgresql':
+                if schema_name:
+                    query = """
+                    SELECT table_name, table_type
+                    FROM information_schema.tables 
+                    WHERE table_schema = :schema_name
+                    ORDER BY table_name
+                    """
+                    parameters = {"schema_name": schema_name}
+                else:
+                    query = """
+                    SELECT table_name, table_type, table_schema
+                    FROM information_schema.tables 
+                    WHERE table_schema NOT IN ('information_schema', 'pg_catalog')
+                    ORDER BY table_schema, table_name
+                    """
+                    parameters = {}
+                    
+            elif db_type == 'mysql':
+                if schema_name:
+                    query = """
+                    SELECT table_name, table_type
+                    FROM information_schema.tables 
+                    WHERE table_schema = :schema_name
+                    ORDER BY table_name
+                    """
+                    parameters = {"schema_name": schema_name}
+                else:
+                    query = """
+                    SELECT table_name, table_type, table_schema
+                    FROM information_schema.tables 
+                    WHERE table_schema NOT IN ('information_schema', 'performance_schema', 'mysql', 'sys')
+                    ORDER BY table_schema, table_name
+                    """
+                    parameters = {}
+                    
+            elif db_type == 'sqlite':
+                # SQLite - usar sqlite_master
+                query = """
+                SELECT name as table_name, type as table_type
+                FROM sqlite_master 
+                WHERE type IN ('table', 'view')
+                ORDER BY name
+                """
+                parameters = {}
+                
+            elif db_type == 'sqlserver':
+                if schema_name:
+                    query = """
+                    SELECT table_name, table_type
+                    FROM information_schema.tables 
+                    WHERE table_schema = :schema_name
+                    ORDER BY table_name
+                    """
+                    parameters = {"schema_name": schema_name}
+                else:
+                    query = """
+                    SELECT table_name, table_type, table_schema
+                    FROM information_schema.tables 
+                    WHERE table_schema NOT IN ('sys', 'information_schema')
+                    ORDER BY table_schema, table_name
+                    """
+                    parameters = {}
+                    
+            else:
+                # Fallback genérico
+                if schema_name:
+                    query = """
+                    SELECT table_name, table_type
+                    FROM information_schema.tables 
+                    WHERE table_schema = :schema_name
+                    ORDER BY table_name
+                    """
+                    parameters = {"schema_name": schema_name}
+                else:
+                    query = """
+                    SELECT table_name, table_type, table_schema
+                    FROM information_schema.tables 
+                    ORDER BY table_schema, table_name
+                    """
+                    parameters = {}
+                    
+            return self.execute_query(query, parameters)
+            
+        except SQLAlchemyError as e:
+            logger.error(f"Erro ao obter tabelas: {e}")
+            raise
+        
     def __enter__(self):
         """Suporte para context manager."""
         self.connect()
